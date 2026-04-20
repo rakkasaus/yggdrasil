@@ -11,16 +11,15 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Step counter
+TOTAL_STEPS=23
+CURRENT_STEP=0
 
 # Logging - FIXED: Check /tmp space first
 LOG_FILE="/tmp/yggdrasil-install.log"
-if [ "$(df -m /tmp | tail -1 | awk '{print $4}')" -lt 100 ]; then
-    print_warning "/tmp has less than 100MB free, logging to /root instead"
-    LOG_FILE="/root/yggdrasil-install.log"
-fi
-exec 1> >(tee -a "$LOG_FILE")
-exec 2>&1
 
 # Error handler
 error_exit() {
@@ -56,6 +55,13 @@ print_header() {
     echo ""
 }
 
+print_step() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    echo ""
+    echo -e "${CYAN}[STEP $CURRENT_STEP of $TOTAL_STEPS] $1${NC}"
+    echo -e "${CYAN}------------------------------------------------${NC}"
+}
+
 print_section() {
     echo -e "${GREEN}[*] $1${NC}"
 }
@@ -73,7 +79,8 @@ print_success() {
 }
 
 detect_disks() {
-    print_section "Detecting storage devices..."
+    print_step "Detecting Storage Devices"
+    print_section "Scanning for SSD and HDD..."
     
     # FIXED: Ensure NVMe module is loaded
     modprobe nvme 2>/dev/null || true
@@ -141,6 +148,7 @@ detect_disks() {
 }
 
 confirm_disks() {
+    print_step "Confirming Disk Selection"
     print_warning "WARNING: This will ERASE all data on:"
     echo "  SSD: $SSD_DISK (Arch Linux installation)"
     echo "  HDD: $HDD_DISK (Storage partition)"
@@ -156,7 +164,8 @@ confirm_disks() {
 }
 
 get_password() {
-    print_section "Setting up user account..."
+    print_step "Setting Up User Account"
+    print_section "Creating user 'rakkasaus'..."
     echo "This password will be used for both root and user '$USERNAME'"
     echo ""
     
@@ -179,7 +188,8 @@ get_password() {
 }
 
 confirm_locale() {
-    print_section "Locale configuration..."
+    print_step "Configuring Locale and Timezone"
+    print_section "Setting Norwegian keyboard, Europe/Oslo timezone..."
     echo "Detected settings:"
     echo "  Timezone: $TIMEZONE"
     echo "  Locale: $LOCALE"
@@ -207,7 +217,8 @@ confirm_locale() {
 }
 
 verify_uefi() {
-    print_section "Verifying UEFI boot mode..."
+    print_step "Verifying UEFI Boot Mode"
+    print_section "Checking EFI variables..."
     
     if [ ! -d /sys/firmware/efi/efivars ]; then
         print_error "Not booted in UEFI mode! Please reboot in UEFI mode."
@@ -225,7 +236,8 @@ verify_uefi() {
 }
 
 setup_network() {
-    print_section "Setting up network..."
+    print_step "Setting Up Network Connection"
+    print_section "Testing connectivity to archlinux.org..."
     
     # Check if we have network
     if ! ping -c 1 archlinux.org &>/dev/null; then
@@ -247,7 +259,8 @@ setup_network() {
 }
 
 partition_disks() {
-    print_section "Partitioning disks..."
+    print_step "Partitioning and Formatting Disks"
+    print_section "Creating EFI (1GB) and Root partitions on SSD..."
     
     # Check if /mnt is already mounted
     if mountpoint -q /mnt; then
@@ -310,7 +323,8 @@ partition_disks() {
 }
 
 mount_partitions() {
-    print_section "Mounting partitions..."
+    print_step "Mounting Partitions"
+    print_section "Mounting root and EFI partitions to /mnt..."
     
     # FIXED: Unmount if already mounted
     umount /mnt/boot 2>/dev/null || true
@@ -328,7 +342,9 @@ mount_partitions() {
 }
 
 install_base() {
-    print_section "Installing base system..."
+    print_step "Installing Base System (pacstrap)"
+    print_section "This will take 10-15 minutes..."
+    print_section "Installing: base, base-devel, linux, linux-firmware, networkmanager..."
     
     # Update pacman
     pacman -Sy
@@ -356,7 +372,8 @@ install_base() {
 }
 
 generate_fstab() {
-    print_section "Generating fstab..."
+    print_step "Generating fstab"
+    print_section "Creating filesystem table with UUIDs..."
     
     # Generate fstab
     genfstab -U /mnt >> /mnt/etc/fstab
@@ -386,7 +403,8 @@ generate_fstab() {
 }
 
 configure_system() {
-    print_section "Configuring system..."
+    print_step "Configuring System Settings"
+    print_section "Setting timezone, locale, keyboard, hostname..."
     
     # Timezone
     arch-chroot /mnt ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
@@ -417,7 +435,8 @@ EOF
 }
 
 install_bootloader() {
-    print_section "Installing bootloader..."
+    print_step "Installing Bootloader (systemd-boot or GRUB)"
+    print_section "Configuring EFI bootloader entries..."
     
     # FIXED: Check if EFI vars accessible
     if [ -d /sys/firmware/efi/efivars ]; then
@@ -469,7 +488,8 @@ EOF
 }
 
 create_user() {
-    print_section "Creating user account..."
+    print_step "Creating User Account"
+    print_section "Setting up 'rakkasaus' with sudo access..."
     
     # FIXED: Check if user already exists
     if arch-chroot /mnt id "$USERNAME" &>/dev/null; then
@@ -496,7 +516,8 @@ create_user() {
 }
 
 install_desktop() {
-    print_section "Installing Hyprland desktop environment..."
+    print_step "Installing Hyprland Desktop Environment"
+    print_section "Installing: hyprland, waybar, wofi, alacritty, pipewire..."
     
     # FIXED: Added playerctl for media keys
     arch-chroot /mnt pacman -S --noconfirm \
@@ -519,7 +540,8 @@ install_desktop() {
 }
 
 install_nvidia() {
-    print_section "Installing NVIDIA drivers..."
+    print_step "Installing NVIDIA Drivers"
+    print_section "Installing nvidia, nvidia-utils, configuring mkinitcpio..."
     
     # Install proprietary NVIDIA drivers with fallback
     if ! arch-chroot /mnt pacman -S --noconfirm nvidia nvidia-utils nvidia-settings lib32-nvidia-utils 2>/dev/null; then
@@ -550,7 +572,8 @@ install_nvidia() {
 }
 
 configure_hyprland() {
-    print_section "Configuring Hyprland..."
+    print_step "Configuring Hyprland Settings"
+    print_section "Creating hyprland.conf with Omarchy-like keybindings..."
     
     USER_HOME="/mnt/home/$USERNAME"
     
@@ -664,7 +687,8 @@ EOF
 }
 
 install_essential_software() {
-    print_section "Installing essential software..."
+    print_step "Installing Essential Software"
+    print_section "Installing: neovim, btop, git, openssh, github-cli..."
     
     arch-chroot /mnt pacman -S --noconfirm \
         neovim \
@@ -689,7 +713,8 @@ install_essential_software() {
 }
 
 configure_ssh() {
-    print_section "Configuring SSH..."
+    print_step "Configuring SSH Server"
+    print_section "Setting up key-based authentication, disabling password auth..."
     
     # Backup original config
     cp /mnt/etc/ssh/sshd_config /mnt/etc/ssh/sshd_config.backup 2>/dev/null || true
@@ -745,7 +770,8 @@ EOF
 }
 
 install_yay() {
-    print_section "Installing yay (AUR helper)..."
+    print_step "Installing yay (AUR Helper)"
+    print_section "Building yay from AUR (this may take a few minutes)..."
     
     # Install dependencies including go
     arch-chroot /mnt pacman -S --noconfirm --needed git base-devel go
@@ -781,7 +807,8 @@ install_yay() {
 }
 
 install_brave() {
-    print_section "Installing Brave browser..."
+    print_step "Installing Brave Browser"
+    print_section "Installing brave-bin from AUR..."
     
     arch-chroot /mnt /bin/bash -c "yay -S --noconfirm brave-bin" "$USERNAME"
     
@@ -790,7 +817,8 @@ install_brave() {
 }
 
 configure_audio() {
-    print_section "Configuring audio..."
+    print_step "Configuring Audio (PipeWire)"
+    print_section "Setting up PipeWire with WirePlumber..."
     
     USER_HOME="/mnt/home/$USERNAME"
     
@@ -809,7 +837,8 @@ configure_audio() {
 }
 
 enable_services() {
-    print_section "Enabling services..."
+    print_step "Enabling System Services"
+    print_section "Enabling: NetworkManager, SSH, reflector, paccache..."
     
     # Network
     arch-chroot /mnt systemctl enable NetworkManager.service
@@ -838,7 +867,8 @@ EOF
 }
 
 setup_autologin() {
-    print_section "Setting up autologin..."
+    print_step "Setting Up Autologin"
+    print_section "Configuring automatic login to Hyprland on tty1..."
     
     mkdir -p /mnt/etc/systemd/system/getty@tty1.service.d
     
@@ -853,7 +883,8 @@ EOF
 }
 
 configure_hyprland_autostart() {
-    print_section "Configuring Hyprland autostart..."
+    print_step "Configuring Hyprland Autostart"
+    print_section "Setting up .bash_profile to launch Hyprland..."
     
     USER_HOME="/mnt/home/$USERNAME"
     
@@ -880,7 +911,8 @@ EOF
 }
 
 final_steps() {
-    print_section "Finalizing installation..."
+    print_step "Finalizing Installation"
+    print_section "Creating storage directories, setting permissions..."
     
     # Create storage directory structure
     mkdir -p /mnt/mnt/storage
@@ -919,8 +951,10 @@ EOF
 }
 
 print_summary() {
+    echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  Installation Complete!${NC}"
+    echo -e "${GREEN}  All $TOTAL_STEPS Steps Finished${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
     echo "System: YggdrasilHost"
@@ -965,10 +999,17 @@ main() {
     print_summary
     
     # Unmount before reboot
-    print_section "Syncing and unmounting..."
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    echo ""
+    echo -e "${CYAN}[STEP $CURRENT_STEP of $TOTAL_STEPS] Preparing for Reboot${NC}"
+    echo -e "${CYAN}------------------------------------------------${NC}"
+    print_section "Syncing filesystems and unmounting..."
     sync
     umount -R /mnt || true
     
+    echo ""
+    echo -e "${GREEN}✓ Installation complete!${NC}"
+    echo ""
     echo -n "Reboot now? [Y/n]: "
     read -r reboot_confirm
     if [[ ! "$reboot_confirm" =~ ^[Nn]$ ]]; then
