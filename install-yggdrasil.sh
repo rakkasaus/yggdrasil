@@ -630,9 +630,9 @@ install_desktop() {
         wireplumber \
         alacritty \
         waybar wofi mako \
-        swww \
+        awww \
         noto-fonts noto-fonts-cjk noto-fonts-emoji \
-        ttf-font-awesome \
+        otf-font-awesome \
         xdg-utils xdg-user-dirs \
         wl-clipboard \
         playerctl
@@ -646,7 +646,8 @@ install_nvidia() {
     print_section "Installing nvidia, nvidia-utils, configuring mkinitcpio..."
     
     # Install proprietary NVIDIA drivers with fallback
-    if ! arch-chroot /mnt pacman -S --noconfirm nvidia nvidia-utils nvidia-settings lib32-nvidia-utils 2>/dev/null; then
+    # FIXED: nvidia package renamed to nvidia-open in Dec 2025
+    if ! arch-chroot /mnt pacman -S --noconfirm nvidia-open nvidia-utils nvidia-settings lib32-nvidia-utils 2>/dev/null; then
         print_warning "NVIDIA driver installation failed!"
         print_warning "Installing fallback drivers..."
         arch-chroot /mnt pacman -S --noconfirm xf86-video-fbdev xf86-video-vesa || true
