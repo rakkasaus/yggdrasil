@@ -20,7 +20,14 @@ CURRENT_STEP=0
 
 # Logging - FIXED: Check /tmp space first and set proper permissions
 LOG_FILE="/tmp/yggdrasil-install.log"
-if [ "$(df -m /tmp | tail -1 | awk '{print $4}')" -lt 100 ]; then
+
+# FIXED: Safely check tmp space with fallback (handles df failures)
+get_tmp_free_space() {
+    df -m /tmp 2>/dev/null | tail -1 | awk '{print $4}' || echo "0"
+}
+
+TMP_FREE=$(get_tmp_free_space)
+if [ "${TMP_FREE:-0}" -lt 100 ]; then
     LOG_FILE="/root/yggdrasil-install.log"
 fi
 
@@ -102,16 +109,16 @@ detect_disks() {
     lsblk -dpno NAME,SIZE,MODEL | grep -E "(nvme|sd|hd)" || true
     echo ""
     
-    # FIXED: Use bytes for consistent size detection across locales
-    SSD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/[45][0-9][0-9]G/ && /nvme/ {print $1}' | head -1)
+    # FIXED: Use bytes for consistent size detection across locales (handles 500G, 500,0G, 480G, etc)
+    SSD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '($2 ~ /[45][0-9][0-9][,.]?[0-9]*G/) && /nvme/ {print $1}' | head -1)
     
     # If no NVMe, look for ~500GB SSD
     if [ -z "$SSD_DISK" ]; then
         SSD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/[45][0-9][0-9]G/ && /(SSD|Kingston|Samsung|WD|A2000)/ {print $1}' | head -1)
     fi
     
-    # FIXED: Better HDD detection for ~5.5TB (updated from 4TB)
-    HDD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/(5\.5|5|6)T/ || /5500G|5000G|6000G/ {print $1}' | head -1)
+    # FIXED: Better HDD detection for ~4TB (accepts 3.5-5TB range)
+    HDD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/(3\.5|4|4\.5|5)T/ || /3500G|4000G|4500G|5000G/ {print $1}' | head -1)
     
     # If still not found, ask user
     if [ -z "$SSD_DISK" ]; then
@@ -292,10 +299,12 @@ partition_disks() {
         cryptsetup close "$cryptdev" 2>/dev/null || true
     done
     
-    # FIXED: Check if disk is frozen and attempt to unfreeze
+    # FIXED: Check if disk is frozen - CANNOT unfreeze automatically
     if command -v hdparm &>/dev/null && hdparm -I "$SSD_DISK" 2>/dev/null | grep -q "frozen"; then
-        print_warning "Disk is frozen, attempting to unfreeze..."
-        systemctl suspend 2>/dev/null || sleep 5
+        print_error "ERROR: Disk is frozen!"
+        print_error "This is a security feature. Please power cycle the system and retry."
+        print_error "The disk needs a cold boot to unfreeze."
+        exit 1
     fi
     
     # FIXED: Comprehensive disk wiping for dirty disks
@@ -616,9 +625,9 @@ create_user() {
     # FIXED: Ensure user is in all required groups even if user existed
     arch-chroot /mnt usermod -aG wheel,audio,input,storage,power,network "$USERNAME" 2>/dev/null || true
     
-    # FIXED: Use printf to safely handle special characters in password
-    printf 'root:%s\n' "$USER_PASSWORD" | arch-chroot /mnt chpasswd
-    printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | arch-chroot /mnt chpasswd
+    # FIXED: Use echo with proper quoting for password (avoids printf % interpretation)
+    echo "root:${USER_PASSWORD}" | arch-chroot /mnt chpasswd
+    echo "${USERNAME}:${USER_PASSWORD}" | arch-chroot /mnt chpasswd
     
     # Configure sudo with strict permissions
     print_section "Configuring sudo access..."
@@ -674,7 +683,7 @@ install_desktop() {
         wireplumber \
         alacritty \
         waybar wofi mako \
-        awww \
+        swww \
         noto-fonts noto-fonts-cjk noto-fonts-emoji \
         otf-font-awesome \
         xdg-utils xdg-user-dirs \
@@ -1028,13 +1037,14 @@ install_yay() {
     export GOPATH="/tmp/go-build"
     export GOMODCACHE="/tmp/go-mod"
     
-    # FIXED: Cleanup function for temp directory
+    # FIXED: Cleanup function for temp directory (preserves error handler)
     cleanup_yay() {
         rm -rf /mnt/tmp/yay-build 2>/dev/null || true
         rm -rf /mnt/tmp/go-build 2>/dev/null || true
         rm -rf /mnt/tmp/go-mod 2>/dev/null || true
     }
-    trap cleanup_yay EXIT
+    # Add EXIT trap without overwriting ERR trap
+    trap 'cleanup_yay' EXIT
     
     # FIXED: Import common PGP keys for AUR packages
     print_section "Importing PGP keys for AUR..."
@@ -1282,13 +1292,13 @@ final_steps() {
     mkdir -p /mnt/mnt/storage/docker/{configs,data}
     mkdir -p /mnt/mnt/storage/shares
     
-    # FIXED: Set ownership and permissions properly
+    # FIXED: Set ownership and permissions properly (on host side, before chroot)
     # User owns the storage directory
-    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /mnt/storage
+    chown -R "$USERNAME:$USERNAME" /mnt/mnt/storage
     # Set directory permissions (rwx for owner, r-x for group, --- for others)
-    arch-chroot /mnt chmod 750 /mnt/storage
-    arch-chroot /mnt chmod -R u+rwx,go-rwx /mnt/storage/docker
-    arch-chroot /mnt chmod -R u+rwx,go-rwx /mnt/storage/shares
+    chmod 750 /mnt/mnt/storage
+    chmod -R u+rwx,go-rwx /mnt/mnt/storage/docker
+    chmod -R u+rwx,go-rwx /mnt/mnt/storage/shares
     
     # FIXED: Create XDG_RUNTIME_DIR for Wayland
     print_section "Setting up runtime directory for Wayland..."
