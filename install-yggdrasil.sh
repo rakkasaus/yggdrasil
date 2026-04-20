@@ -117,8 +117,8 @@ detect_disks() {
         SSD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/[45][0-9][0-9]G/ && /(SSD|Kingston|Samsung|WD|A2000)/ {print $1}' | head -1)
     fi
     
-    # FIXED: Better HDD detection for ~4TB (accepts 3.5-5TB range)
-    HDD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/(3\.5|4|4\.5|5)T/ || /3500G|4000G|4500G|5000G/ {print $1}' | head -1)
+    # FIXED: Better HDD detection for ~5.5TB
+    HDD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/(5\.5|5|6)T/ || /5500G|5000G|6000G/ {print $1}' | head -1)
     
     # If still not found, ask user
     if [ -z "$SSD_DISK" ]; then
@@ -625,9 +625,9 @@ create_user() {
     # FIXED: Ensure user is in all required groups even if user existed
     arch-chroot /mnt usermod -aG wheel,audio,input,storage,power,network "$USERNAME" 2>/dev/null || true
     
-    # FIXED: Use echo with proper quoting for password (avoids printf % interpretation)
-    echo "root:${USER_PASSWORD}" | arch-chroot /mnt chpasswd
-    echo "${USERNAME}:${USER_PASSWORD}" | arch-chroot /mnt chpasswd
+    # FIXED: Use printf to safely handle special characters in password
+    printf 'root:%s\n' "$USER_PASSWORD" | arch-chroot /mnt chpasswd
+    printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | arch-chroot /mnt chpasswd
     
     # Configure sudo with strict permissions
     print_section "Configuring sudo access..."
@@ -683,7 +683,7 @@ install_desktop() {
         wireplumber \
         alacritty \
         waybar wofi mako \
-        swww \
+        awww \
         noto-fonts noto-fonts-cjk noto-fonts-emoji \
         otf-font-awesome \
         xdg-utils xdg-user-dirs \
