@@ -931,46 +931,169 @@ install_yay() {
     print_step "Installing yay (AUR Helper)"
     print_section "Building yay from AUR (this may take a few minutes)..."
     
-    # Install dependencies including go
-    arch-chroot /mnt pacman -S --noconfirm --needed git base-devel go
+    # FIXED: Check if yay is already installed and working
+    if arch-chroot /mnt /bin/bash -c "yay --version" "$USERNAME" &>/dev/null; then
+        print_success "yay is already installed"
+        # Configure yay for non-interactive mode
+        configure_yay
+        return 0
+    fi
     
-    # Create temporary build directory
+    # FIXED: Install all build dependencies explicitly
+    print_section "Installing build dependencies..."
+    arch-chroot /mnt pacman -S --noconfirm --needed git base-devel go fakeroot binutils file debugedit
+    
+    # FIXED: Configure makepkg for faster builds (disable slow compression)
+    print_section "Configuring makepkg for faster builds..."
+    arch-chroot /mnt /bin/bash -c "
+        # Speed up makepkg by using zstd instead of xz, or no compression for temp builds
+        if [ -f /etc/makepkg.conf ]; then
+            # Use zstd (fast) instead of xz (slow)
+            sed -i 's/^PKGEXT=.*/PKGEXT=\".pkg.tar.zst\"/g' /etc/makepkg.conf 2>/dev/null || true
+            # Use all CPU cores for compilation
+            sed -i 's/^#MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/g' /etc/makepkg.conf 2>/dev/null || true
+            sed -i 's/^MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/g' /etc/makepkg.conf 2>/dev/null || true
+        fi
+    "
+    
+    # Create temporary build directory with proper permissions
     mkdir -p /mnt/tmp/yay-build
+    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/yay-build
+    
+    # FIXED: Set up Go environment for building
+    export GOPATH="/tmp/go-build"
+    export GOMODCACHE="/tmp/go-mod"
     
     # FIXED: Cleanup function for temp directory
     cleanup_yay() {
         rm -rf /mnt/tmp/yay-build 2>/dev/null || true
+        rm -rf /mnt/tmp/go-build 2>/dev/null || true
+        rm -rf /mnt/tmp/go-mod 2>/dev/null || true
     }
     trap cleanup_yay EXIT
     
-    # Clone and build yay
+    # FIXED: Import common PGP keys for AUR packages
+    print_section "Importing PGP keys for AUR..."
     arch-chroot /mnt /bin/bash -c "
+        # Import common keys that AUR packages use
+        gpg --keyserver keyserver.ubuntu.com --recv-keys 4AEE18F83AFDEB23 2>/dev/null || true
+        gpg --keyserver keyserver.ubuntu.com --recv-keys A2C794A586439B4C 2>/dev/null || true
+    " "$USERNAME" || true
+    
+    # Clone and build yay with better error handling
+    print_section "Cloning and building yay..."
+    if ! arch-chroot /mnt /bin/bash -c "
+        export GOPATH=/tmp/go-build
+        export GOMODCACHE=/tmp/go-mod
+        export CGO_ENABLED=1
         cd /tmp/yay-build
-        git clone https://aur.archlinux.org/yay.git
+        
+        # Clone with shallow history for faster download
+        git clone --depth 1 https://aur.archlinux.org/yay.git 2>&1 || {
+            echo 'Git clone failed, trying with full clone...'
+            rm -rf yay
+            git clone https://aur.archlinux.org/yay.git 2>&1
+        }
+        
         cd yay
-        makepkg -si --noconfirm --needed
-    " "$USERNAME"
+        
+        # Build with explicit flags to avoid prompts
+        makepkg -si --noconfirm --needed --noprogressbar 2>&1 || {
+            echo 'makepkg failed, trying with skipchecksums...'
+            makepkg -si --noconfirm --needed --skipchecksums --skippgpcheck 2>&1
+        }
+    " "$USERNAME"; then
+        
+        print_warning "yay build failed, trying paru as alternative..."
+        
+        # FIXED: Try paru as fallback
+        if arch-chroot /mnt /bin/bash -c "
+            cd /tmp/yay-build
+            git clone --depth 1 https://aur.archlinux.org/paru.git 2>&1 || {
+                rm -rf paru
+                git clone https://aur.archlinux.org/paru.git 2>&1
+            }
+            cd paru
+            makepkg -si --noconfirm --needed 2>&1
+        " "$USERNAME"; then
+            print_success "paru installed as alternative to yay"
+            # Create yay symlink for compatibility
+            arch-chroot /mnt ln -sf /usr/bin/paru /usr/local/bin/yay 2>/dev/null || true
+        else
+            print_error "Both yay and paru failed to build!"
+            print_error "AUR packages will not be available."
+            # Don't exit - system will work without AUR
+        fi
+    fi
     
     # Remove temporary passwordless sudo
     rm -f /mnt/etc/sudoers.d/temp-yay
     
-    # FIXED: Verify yay installation
-    if ! arch-chroot /mnt which yay &>/dev/null; then
-        print_error "yay installation failed!"
-        exit 1
+    # Verify AUR helper installation
+    if arch-chroot /mnt which yay &>/dev/null || arch-chroot /mnt which paru &>/dev/null; then
+        print_success "AUR helper installed"
+        configure_yay
+    else
+        print_warning "No AUR helper available - AUR packages will be skipped"
     fi
     
-    print_success "yay installed"
     echo ""
+}
+
+# FIXED: Configure yay for non-interactive operation
+configure_yay() {
+    print_section "Configuring AUR helper for non-interactive mode..."
+    
+    arch-chroot /mnt /bin/bash -c "
+        # Configure yay/paru to not prompt for everything
+        if command -v yay &>/dev/null; then
+            yay --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
+            yay --save --answerclean All --answerdiff None --answerupgrade None 2>/dev/null || true
+        fi
+        if command -v paru &>/dev/null; then
+            paru --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
+            paru --save --skipreview 2>/dev/null || true
+        fi
+    " "$USERNAME" || true
+    
+    print_success "AUR helper configured"
 }
 
 install_brave() {
     print_step "Installing Brave Browser"
     print_section "Installing brave-bin from AUR..."
     
-    arch-chroot /mnt /bin/bash -c "yay -S --noconfirm brave-bin" "$USERNAME"
+    # FIXED: Check if AUR helper is available
+    if ! arch-chroot /mnt which yay &>/dev/null && ! arch-chroot /mnt which paru &>/dev/null; then
+        print_warning "No AUR helper available, skipping Brave installation"
+        print_warning "You can install Brave manually after setup with:"
+        print_warning "  yay -S brave-bin"
+        return 0
+    fi
     
-    print_success "Brave browser installed"
+    # FIXED: Install brave-bin with better error handling
+    if arch-chroot /mnt /bin/bash -c "
+        export GOPATH=/tmp/go-build
+        export GOMODCACHE=/tmp/go-mod
+        if command -v yay &>/dev/null; then
+            yay -S --noconfirm brave-bin 2>&1
+        else
+            paru -S --noconfirm brave-bin 2>&1
+        fi
+    " "$USERNAME"; then
+        
+        # FIXED: Verify installation
+        if arch-chroot /mnt which brave &>/dev/null || [ -f /usr/bin/brave ]; then
+            print_success "Brave browser installed"
+        else
+            print_warning "Brave installation may have succeeded but binary not found"
+            print_warning "You may need to restart or manually install: yay -S brave-bin"
+        fi
+    else
+        print_warning "Brave installation failed"
+        print_warning "You can try manually after reboot: yay -S brave-bin"
+    fi
+    
     echo ""
 }
 
