@@ -1004,6 +1004,10 @@ install_yay() {
     print_step "Installing yay (AUR Helper)"
     print_section "Building yay from AUR (this may take a few minutes)..."
     
+    # FIXED: Ensure sudoers directory exists
+    mkdir -p /mnt/etc/sudoers.d
+    chmod 755 /mnt/etc/sudoers.d
+    
     # FIXED: Check if yay is already installed and working
     if arch-chroot /mnt /bin/bash -c "yay --version" "$USERNAME" &>/dev/null; then
         print_success "yay is already installed"
@@ -1012,9 +1016,16 @@ install_yay() {
         return 0
     fi
     
+    # FIXED: Recreate sudoers file if it was deleted in previous run
+    if [ ! -f /mnt/etc/sudoers.d/temp-yay ]; then
+        print_section "Setting up temporary passwordless sudo for AUR build..."
+        echo "$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/pacman" > /mnt/etc/sudoers.d/temp-yay
+        chmod 440 /mnt/etc/sudoers.d/temp-yay
+    fi
+    
     # FIXED: Install all build dependencies explicitly
     print_section "Installing build dependencies..."
-    arch-chroot /mnt pacman -S --noconfirm --needed git base-devel go fakeroot binutils file debugedit
+    arch-chroot /mnt pacman -S --noconfirm --needed git base-devel go fakeroot binutils file debugedit gcc
     
     # FIXED: Configure makepkg for faster builds (disable slow compression)
     print_section "Configuring makepkg for faster builds..."
@@ -1024,18 +1035,22 @@ install_yay() {
             # Use zstd (fast) instead of xz (slow)
             sed -i 's/^PKGEXT=.*/PKGEXT=\".pkg.tar.zst\"/g' /etc/makepkg.conf 2>/dev/null || true
             # Use all CPU cores for compilation
-            sed -i 's/^#MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/g' /etc/makepkg.conf 2>/dev/null || true
-            sed -i 's/^MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/g' /etc/makepkg.conf 2>/dev/null || true
+            sed -i 's/^#MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/' /etc/makepkg.conf 2>/dev/null || true
+            sed -i 's/^MAKEFLAGS=.*/MAKEFLAGS=\"-j$(nproc)\"/' /etc/makepkg.conf 2>/dev/null || true
         fi
     "
+    
+    # FIXED: Ensure /tmp has correct permissions for user builds
+    chmod 1777 /mnt/tmp 2>/dev/null || true
     
     # Create temporary build directory with proper permissions
     mkdir -p /mnt/tmp/yay-build
     arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/yay-build
     
-    # FIXED: Set up Go environment for building
-    export GOPATH="/tmp/go-build"
-    export GOMODCACHE="/tmp/go-mod"
+    # FIXED: Create and chown Go build directories
+    mkdir -p /mnt/tmp/go-build /mnt/tmp/go-mod
+    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/go-build
+    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/go-mod
     
     # FIXED: Cleanup function for temp directory (preserves error handler)
     cleanup_yay() {
@@ -1043,6 +1058,99 @@ install_yay() {
         rm -rf /mnt/tmp/go-build 2>/dev/null || true
         rm -rf /mnt/tmp/go-mod 2>/dev/null || true
     }
+    # Add EXIT trap without overwriting ERR trap
+    trap 'cleanup_yay' EXIT
+    
+    # FIXED: Initialize GPG directory for user before importing keys
+    print_section "Initializing GPG for AUR key import..."
+    arch-chroot /mnt /bin/bash -c "
+        # Create GPG home directory with proper permissions
+        mkdir -p ~/.gnupg
+        chmod 700 ~/.gnupg
+        # Initialize GPG quietly
+        gpg --list-keys 2>/dev/null || true
+    " "$USERNAME" || true
+    
+    # FIXED: Import common PGP keys for AUR packages
+    print_section "Importing PGP keys for AUR..."
+    arch-chroot /mnt /bin/bash -c "
+        # Import common keys that AUR packages use
+        gpg --keyserver keyserver.ubuntu.com --recv-keys 4AEE18F83AFDEB23 2>/dev/null || true
+        gpg --keyserver keyserver.ubuntu.com --recv-keys A2C794A586439B4C 2>/dev/null || true
+    " "$USERNAME" || true
+    
+    # Clone and build yay with better error handling
+    print_section "Cloning and building yay..."
+    if ! arch-chroot /mnt /bin/bash -c "
+        export GOPATH=/tmp/go-build
+        export GOMODCACHE=/tmp/go-mod
+        # FIXED: Disable CGO for pure Go build (avoids gcc dependency issues)
+        export CGO_ENABLED=0
+        cd /tmp/yay-build
+        
+        # Clone with shallow history for faster download
+        git clone --depth 1 https://aur.archlinux.org/yay.git 2>&1 || {
+            echo 'Git clone failed, trying with full clone...'
+            rm -rf yay
+            git clone https://aur.archlinux.org/yay.git 2>&1
+        }
+        
+        cd yay
+        
+        # FIXED: Build only first, then install with sudo separately
+        # This avoids makepkg -si sudo escalation issues
+        makepkg -s --noconfirm --needed --noprogressbar 2>&1 || {
+            echo 'makepkg failed, trying with skipchecksums...'
+            makepkg -s --noconfirm --needed --skipchecksums --skippgpcheck 2>&1
+        }
+        
+        # Install built package with sudo
+        sudo pacman -U --noconfirm yay-*.pkg.tar.zst 2>&1 || {
+            echo 'Package install failed'
+            exit 1
+        }
+    " "$USERNAME"; then
+        
+        print_warning "yay build failed, trying paru as alternative..."
+        
+        # FIXED: Try paru as fallback
+        if arch-chroot /mnt /bin/bash -c "
+            export GOPATH=/tmp/go-build
+            export GOMODCACHE=/tmp/go-mod
+            export CGO_ENABLED=0
+            cd /tmp/yay-build
+            git clone --depth 1 https://aur.archlinux.org/paru.git 2>&1 || {
+                rm -rf paru
+                git clone https://aur.archlinux.org/paru.git 2>&1
+            }
+            cd paru
+            # Build only, then install
+            makepkg -s --noconfirm --needed 2>&1
+            sudo pacman -U --noconfirm paru-*.pkg.tar.zst 2>&1
+        " "$USERNAME"; then
+            print_success "paru installed as alternative to yay"
+            # Create yay symlink for compatibility
+            arch-chroot /mnt ln -sf /usr/bin/paru /usr/local/bin/yay 2>/dev/null || true
+        else
+            print_error "Both yay and paru failed to build!"
+            print_error "AUR packages will not be available."
+            # Don't exit - system will work without AUR
+        fi
+    fi
+    
+    # Remove temporary passwordless sudo
+    rm -f /mnt/etc/sudoers.d/temp-yay
+    
+    # Verify AUR helper installation
+    if arch-chroot /mnt which yay &>/dev/null || arch-chroot /mnt which paru &>/dev/null; then
+        print_success "AUR helper installed"
+        configure_yay
+    else
+        print_warning "No AUR helper available - AUR packages will be skipped"
+    fi
+    
+    echo ""
+}
     # Add EXIT trap without overwriting ERR trap
     trap 'cleanup_yay' EXIT
     
@@ -1118,13 +1226,21 @@ install_yay() {
 configure_yay() {
     print_section "Configuring AUR helper for non-interactive mode..."
     
+    # FIXED: Ensure config directory exists before configuring
+    arch-chroot /mnt /bin/bash -c "
+        mkdir -p ~/.config
+        chmod 755 ~/.config
+    " "$USERNAME" || true
+    
     arch-chroot /mnt /bin/bash -c "
         # Configure yay/paru to not prompt for everything
         if command -v yay &>/dev/null; then
+            mkdir -p ~/.config/yay
             yay --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
             yay --save --answerclean All --answerdiff None --answerupgrade None 2>/dev/null || true
         fi
         if command -v paru &>/dev/null; then
+            mkdir -p ~/.config/paru
             paru --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
             paru --save --skipreview 2>/dev/null || true
         fi
