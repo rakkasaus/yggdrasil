@@ -697,13 +697,13 @@ install_desktop() {
 
 install_nvidia() {
     print_step "Installing NVIDIA Drivers"
-    print_section "Installing nvidia, nvidia-utils, egl-wayland..."
+    print_section "Installing nvidia-open, nvidia-utils, egl-wayland..."
     
     NVIDIA_SUCCESS=false
     
     # Install proprietary NVIDIA drivers with Wayland support
-    # FIXED: Use 'nvidia' package for RTX 2070 Super (proprietary driver, best compatibility)
-    if arch-chroot /mnt pacman -S --noconfirm nvidia nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-persistenced egl-wayland libva-nvidia-driver libva-utils 2>/dev/null; then
+    # FIXED: Use 'nvidia-open' package (the only NVIDIA driver package in Arch repos as of 2026)
+    if arch-chroot /mnt pacman -S --noconfirm nvidia-open nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-persistenced egl-wayland libva-nvidia-driver libva-utils 2>/dev/null; then
         NVIDIA_SUCCESS=true
         print_success "NVIDIA drivers installed successfully"
     else
