@@ -99,8 +99,8 @@ detect_disks() {
         SSD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/[45][0-9][0-9]G/ && /(SSD|Kingston|Samsung|WD|A2000)/ {print $1}' | head -1)
     fi
     
-    # FIXED: Better HDD detection for ~4TB
-    HDD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/(3\.6|4)T/ || /4000G/ {print $1}' | head -1)
+    # FIXED: Better HDD detection for ~5.5TB (updated from 4TB)
+    HDD_DISK=$(lsblk -dpno NAME,SIZE,MODEL | awk '/(5\.5|5|6)T/ || /5500G|5000G|6000G/ {print $1}' | head -1)
     
     # If still not found, ask user
     if [ -z "$SSD_DISK" ]; then
@@ -113,7 +113,7 @@ detect_disks() {
     fi
     
     if [ -z "$HDD_DISK" ]; then
-        echo "Could not auto-detect HDD (looking for ~4TB disk)."
+        echo "Could not auto-detect HDD (looking for ~5.5TB disk)."
         echo "Please enter HDD device (e.g., /dev/sdb):"
         read -r HDD_DISK
     fi
@@ -268,57 +268,159 @@ partition_disks() {
         umount -R /mnt || true
     fi
     
+    # FIXED: Kill any processes using the disks
+    print_section "Ensuring disks are not in use..."
+    fuser -k "$SSD_DISK" 2>/dev/null || true
+    fuser -k "$HDD_DISK" 2>/dev/null || true
+    
+    # Deactivate any LVM volumes that might be active
+    vgchange -an 2>/dev/null || true
+    
+    # Close any crypt devices
+    for cryptdev in $(ls /dev/mapper/ 2>/dev/null | grep -v control); do
+        cryptsetup close "$cryptdev" 2>/dev/null || true
+    done
+    
     # FIXED: Check if disk is frozen and attempt to unfreeze
     if command -v hdparm &>/dev/null && hdparm -I "$SSD_DISK" 2>/dev/null | grep -q "frozen"; then
         print_warning "Disk is frozen, attempting to unfreeze..."
-        # Try to unfreeze by suspending briefly
         systemctl suspend 2>/dev/null || sleep 5
     fi
     
-    # Wipe SSD
-    print_warning "Wiping SSD: $SSD_DISK"
-    wipefs -af "$SSD_DISK"
-    sgdisk -Zo "$SSD_DISK" || sgdisk --zap-all "$SSD_DISK"
+    # FIXED: Comprehensive disk wiping for dirty disks
+    print_warning "Comprehensively wiping SSD: $SSD_DISK"
+    
+    # Clear filesystem signatures
+    wipefs -af "$SSD_DISK" 2>/dev/null || true
+    
+    # Clear LVM headers (first and last 10MB)
+    dd if=/dev/zero of="$SSD_DISK" bs=1M count=10 status=none 2>/dev/null || true
+    DISK_SIZE=$(blockdev --getsize64 "$SSD_DISK" 2>/dev/null || echo 0)
+    if [ "$DISK_SIZE" -gt 20971520 ]; then  # Only if > 20MB
+        dd if=/dev/zero of="$SSD_DISK" bs=1M seek=$((DISK_SIZE / 1048576 - 10)) count=10 status=none 2>/dev/null || true
+    fi
+    
+    # Try to discard/trim for SSDs (helps with some controllers)
+    blkdiscard -f "$SSD_DISK" 2>/dev/null || true
+    
+    # Clear partition table with fallback
+    if ! sgdisk --zap-all "$SSD_DISK" 2>/dev/null; then
+        print_warning "sgdisk failed, using dd to clear partition table..."
+        dd if=/dev/zero of="$SSD_DISK" bs=512 count=2048 status=none  # Clear primary GPT
+        dd if=/dev/zero of="$SSD_DISK" bs=512 seek=$((DISK_SIZE / 512 - 34)) count=34 status=none 2>/dev/null || true  # Clear backup GPT
+    fi
+    
+    # Force kernel to reread
+    blockdev --flushbufs "$SSD_DISK" 2>/dev/null || true
+    blockdev --rereadpt "$SSD_DISK" 2>/dev/null || true
     
     # Create partitions on SSD
-    # FIXED: Increased EFI to 1GB (was 512MB)
     print_section "Creating partitions on SSD..."
     sgdisk -n 1:0:+1G -t 1:ef00 -c 1:"EFI" "$SSD_DISK"
     sgdisk -n 2:0:0 -t 2:8300 -c 2:"ROOT" "$SSD_DISK"
     
-    # FIXED: Wait longer for kernel to recognize partitions (5 seconds + verification)
-    partprobe "$SSD_DISK"
-    sleep 5
+    # FIXED: Robust partition detection with multiple methods
+    print_section "Waiting for kernel to recognize partitions..."
+    partprobe "$SSD_DISK" 2>/dev/null || blockdev --rereadpt "$SSD_DISK" 2>/dev/null || hdparm -z "$SSD_DISK" 2>/dev/null || true
     
-    # Verify partitions exist
-    if [[ "$SSD_DISK" == *"nvme"* ]]; then
-        [ -e "${SSD_DISK}p1" ] || sleep 3
-        EFI_PART="${SSD_DISK}p1"
-        ROOT_PART="${SSD_DISK}p2"
-    else
-        [ -e "${SSD_DISK}1" ] || sleep 3
-        EFI_PART="${SSD_DISK}1"
-        ROOT_PART="${SSD_DISK}2"
+    # Retry loop for partition detection
+    for i in 1 2 3 4 5; do
+        sleep 2
+        
+        # FIXED: Handle any NVMe namespace number
+        if [[ "$SSD_DISK" =~ nvme[0-9]+n[0-9]+$ ]]; then
+            if [ -e "${SSD_DISK}p1" ] && [ -e "${SSD_DISK}p2" ]; then
+                EFI_PART="${SSD_DISK}p1"
+                ROOT_PART="${SSD_DISK}p2"
+                print_success "NVMe partitions detected"
+                break
+            fi
+        else
+            if [ -e "${SSD_DISK}1" ] && [ -e "${SSD_DISK}2" ]; then
+                EFI_PART="${SSD_DISK}1"
+                ROOT_PART="${SSD_DISK}2"
+                print_success "SATA partitions detected"
+                break
+            fi
+        fi
+        
+        print_warning "Partitions not visible yet, retrying... ($i/5)"
+        partprobe "$SSD_DISK" 2>/dev/null || true
+        blockdev --rereadpt "$SSD_DISK" 2>/dev/null || true
+    done
+    
+    # Verify partitions were found
+    if [ -z "$EFI_PART" ] || [ -z "$ROOT_PART" ]; then
+        print_error "Failed to detect partitions after 5 retries!"
+        print_error "Manual intervention required."
+        exit 1
     fi
     
-    print_success "Partitions created"
+    print_success "Partitions created: $EFI_PART, $ROOT_PART"
     echo ""
     
     # Format partitions
     print_section "Formatting partitions..."
-    mkfs.fat -F 32 -n EFI "$EFI_PART"
-    mkfs.ext4 -L ROOT "$ROOT_PART"
     
-    # Format HDD as single ext4 partition
-    print_warning "Formatting HDD: $HDD_DISK"
-    wipefs -af "$HDD_DISK"
-    mkfs.ext4 -L STORAGE "$HDD_DISK"
+    # FIXED: Robust FAT32 creation for EFI
+    if ! mkfs.fat -F 32 -s 2 -n EFI "$EFI_PART" 2>/dev/null; then
+        print_warning "mkfs.fat failed, trying mkfs.vfat..."
+        mkfs.vfat -F 32 -n EFI "$EFI_PART" || {
+            print_error "Failed to create EFI filesystem!"
+            exit 1
+        }
+    fi
     
-    # FIXED: Force sync and wait for UUID to be written
+    # Create ext4 on root
+    mkfs.ext4 -L ROOT "$ROOT_PART" || {
+        print_error "Failed to create root filesystem!"
+        exit 1
+    }
+    
+    # FIXED: Comprehensive HDD wiping and formatting
+    print_warning "Comprehensively wiping HDD: $HDD_DISK"
+    
+    # Kill processes using HDD
+    fuser -k "$HDD_DISK" 2>/dev/null || true
+    
+    # Clear signatures
+    wipefs -af "$HDD_DISK" 2>/dev/null || true
+    
+    # Clear LVM/RAID headers
+    dd if=/dev/zero of="$HDD_DISK" bs=1M count=10 status=none 2>/dev/null || true
+    HDD_SIZE=$(blockdev --getsize64 "$HDD_DISK" 2>/dev/null || echo 0)
+    if [ "$HDD_SIZE" -gt 20971520 ]; then
+        dd if=/dev/zero of="$HDD_DISK" bs=1M seek=$((HDD_SIZE / 1048576 - 10)) count=10 status=none 2>/dev/null || true
+    fi
+    
+    # Sync before creating filesystem
     sync
-    sleep 2
+    blockdev --flushbufs "$HDD_DISK" 2>/dev/null || true
     
-    print_success "All partitions formatted"
+    # FIXED: Create ext4 with 64-bit support for large disks (5.5TB)
+    print_section "Creating ext4 filesystem on HDD (5.5TB)..."
+    if ! mkfs.ext4 -O 64bit,metadata_csum -E lazy_itable_init=1,lazy_journal_init=1 -L STORAGE "$HDD_DISK" 2>/dev/null; then
+        print_warning "64-bit ext4 failed, trying standard..."
+        mkfs.ext4 -L STORAGE "$HDD_DISK" || {
+            print_error "Failed to create HDD filesystem!"
+            exit 1
+        }
+    fi
+    
+    # FIXED: Robust sync with cache flush for USB bridges
+    print_section "Syncing filesystems to disk..."
+    sync
+    sleep 3
+    blockdev --flushbufs "$SSD_DISK" 2>/dev/null || true
+    blockdev --flushbufs "$HDD_DISK" 2>/dev/null || true
+    hdparm -F "$SSD_DISK" 2>/dev/null || true
+    hdparm -F "$HDD_DISK" 2>/dev/null || true
+    
+    # Clear blkid cache
+    blkid -g "$SSD_DISK" 2>/dev/null || true
+    blkid -g "$HDD_DISK" 2>/dev/null || true
+    
+    print_success "All partitions formatted and synced"
     echo ""
 }
 
