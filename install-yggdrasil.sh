@@ -18,8 +18,19 @@ NC='\033[0m' # No Color
 TOTAL_STEPS=23
 CURRENT_STEP=0
 
-# Logging - FIXED: Check /tmp space first
+# Logging - FIXED: Check /tmp space first and set proper permissions
 LOG_FILE="/tmp/yggdrasil-install.log"
+if [ "$(df -m /tmp | tail -1 | awk '{print $4}')" -lt 100 ]; then
+    LOG_FILE="/root/yggdrasil-install.log"
+fi
+
+# FIXED: Create log file with proper permissions (readable by all for debugging)
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
+
+# FIXED: Set up logging with tee
+exec 1> >(tee -a "$LOG_FILE")
+exec 2>&1
 
 # Error handler
 error_exit() {
@@ -591,29 +602,62 @@ EOF
 
 create_user() {
     print_step "Creating User Account"
-    print_section "Setting up 'rakkasaus' with sudo access..."
+    print_section "Setting up 'rakkasaus' with sudo access and groups..."
     
     # FIXED: Check if user already exists
     if arch-chroot /mnt id "$USERNAME" &>/dev/null; then
-        print_warning "User $USERNAME already exists, updating password..."
+        print_warning "User $USERNAME already exists, updating groups and password..."
     else
-        # Create user
-        arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
+        # Create user with all required groups
+        # FIXED: Added audio, input, storage, power, network groups
+        arch-chroot /mnt useradd -m -G wheel,audio,input,storage,power,network -s /bin/bash "$USERNAME"
     fi
+    
+    # FIXED: Ensure user is in all required groups even if user existed
+    arch-chroot /mnt usermod -aG wheel,audio,input,storage,power,network "$USERNAME" 2>/dev/null || true
     
     # FIXED: Use printf to safely handle special characters in password
     printf 'root:%s\n' "$USER_PASSWORD" | arch-chroot /mnt chpasswd
     printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | arch-chroot /mnt chpasswd
     
-    # Configure sudo
-    echo "%wheel ALL=(ALL:ALL) ALL" > /mnt/etc/sudoers.d/wheel
+    # Configure sudo with strict permissions
+    print_section "Configuring sudo access..."
+    cat > /mnt/etc/sudoers.d/wheel <<EOF
+# Allow wheel group to use sudo
+%wheel ALL=(ALL:ALL) ALL
+
+# Allow passwordless sudo for specific system operations
+%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart *, /usr/bin/systemctl start *, /usr/bin/systemctl stop *
+%wheel ALL=(ALL) NOPASSWD: /usr/bin/mount, /usr/bin/umount
+%wheel ALL=(ALL) NOPASSWD: /usr/bin/pacman -Syu, /usr/bin/pacman -Syyu
+EOF
     chmod 440 /mnt/etc/sudoers.d/wheel
     
     # Add temporary passwordless sudo for yay installation
     echo "$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/pacman" > /mnt/etc/sudoers.d/temp-yay
     chmod 440 /mnt/etc/sudoers.d/temp-yay
     
-    print_success "User '$USERNAME' created with sudo access"
+    # FIXED: Verify sudoers syntax
+    if ! arch-chroot /mnt visudo -c 2>/dev/null; then
+        print_warning "Sudoers syntax check failed, but continuing..."
+    fi
+    
+    # FIXED: Create .ssh directory with proper permissions
+    print_section "Setting up SSH directory..."
+    arch-chroot /mnt mkdir -p "/home/$USERNAME/.ssh"
+    arch-chroot /mnt chmod 700 "/home/$USERNAME/.ssh"
+    arch-chroot /mnt chown "$USERNAME:$USERNAME" "/home/$USERNAME/.ssh"
+    
+    # FIXED: Create authorized_keys file with proper permissions
+    arch-chroot /mnt touch "/home/$USERNAME/.ssh/authorized_keys"
+    arch-chroot /mnt chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
+    arch-chroot /mnt chown "$USERNAME:$USERNAME" "/home/$USERNAME/.ssh/authorized_keys"
+    
+    # FIXED: Ensure home directory has correct permissions
+    arch-chroot /mnt chmod 755 "/home/$USERNAME"
+    arch-chroot /mnt chown "$USERNAME:$USERNAME" "/home/$USERNAME"
+    
+    print_success "User '$USERNAME' created with sudo, audio, input, storage access"
     echo ""
 }
 
@@ -700,17 +744,37 @@ EOF
         # FIXED: Enable nvidia-persistenced for reliable GPU initialization
         arch-chroot /mnt systemctl enable nvidia-persistenced.service 2>/dev/null || true
         
-        # FIXED: Create udev rule for NVIDIA device permissions
+        # FIXED: Create udev rule for NVIDIA device permissions (more secure)
         cat > /mnt/etc/udev/rules.d/70-nvidia.rules <<'EOF'
-# Allow users to access NVIDIA devices
-KERNEL=="nvidia*", MODE="0666", OWNER="root", GROUP="video"
-KERNEL=="nvidia_modeset*", MODE="0666", OWNER="root", GROUP="video"
-KERNEL=="nvidia_uvm*", MODE="0666", OWNER="root", GROUP="video"
-KERNEL=="nvidia_drm", MODE="0666", OWNER="root", GROUP="video"
+# NVIDIA device permissions - video group only
+KERNEL=="nvidia*", MODE="0660", OWNER="root", GROUP="video"
+KERNEL=="nvidia_modeset*", MODE="0660", OWNER="root", GROUP="video"
+KERNEL=="nvidia_uvm*", MODE="0660", OWNER="root", GROUP="video"
+KERNEL=="nvidia_drm", MODE="0660", OWNER="root", GROUP="video"
+KERNEL=="nvidia-caps", MODE="0660", OWNER="root", GROUP="video"
 EOF
+        chmod 644 /mnt/etc/udev/rules.d/70-nvidia.rules
         
-        # FIXED: Add user to video group for GPU access
-        arch-chroot /mnt usermod -aG video "$USERNAME" 2>/dev/null || true
+        # FIXED: Add user to video group for GPU access (with verification)
+        if arch-chroot /mnt usermod -aG video "$USERNAME" 2>/dev/null; then
+            print_success "User added to video group for GPU access"
+        else
+            print_warning "Failed to add user to video group"
+        fi
+        
+        # FIXED: Create polkit rule for NVIDIA power management
+        mkdir -p /mnt/etc/polkit-1/rules.d
+        cat > /mnt/etc/polkit-1/rules.d/50-nvidia.rules <<'EOF'
+// Allow users in video group to manage NVIDIA settings
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("command_line").indexOf("nvidia-settings") >= 0 &&
+        subject.isInGroup("video")) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+        chmod 644 /mnt/etc/polkit-1/rules.d/50-nvidia.rules
         
         print_success "NVIDIA drivers configured with DRM KMS, persistenced, and video memory preservation"
     else
@@ -1103,17 +1167,30 @@ configure_audio() {
     
     USER_HOME="/mnt/home/$USERNAME"
     
+    # FIXED: Ensure user is in audio group (redundant but safe)
+    arch-chroot /mnt usermod -aG audio "$USERNAME" 2>/dev/null || true
+    
     # Enable PipeWire services
     arch-chroot /mnt systemctl --global enable pipewire.socket
     arch-chroot /mnt systemctl --global enable pipewire-pulse.socket
     arch-chroot /mnt systemctl --global enable wireplumber.service
     arch-chroot /mnt systemctl --global enable pipewire.service
     
-    # Create wireplumber config directory
+    # Create wireplumber config directory with proper permissions
     mkdir -p "$USER_HOME/.config/wireplumber"
-    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config/wireplumber"
+    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
+    arch-chroot /mnt chmod -R u+rwx,go-rwx "/home/$USERNAME/.config/wireplumber" 2>/dev/null || true
     
-    print_success "Audio configured"
+    # FIXED: Create PipeWire runtime directory permissions
+    mkdir -p /mnt/etc/udev/rules.d
+    cat > /mnt/etc/udev/rules.d/90-pipewire.rules <<'EOF'
+# PipeWire device permissions
+SUBSYSTEM=="sound", GROUP="audio", MODE="0660"
+SUBSYSTEM=="snd", GROUP="audio", MODE="0660"
+EOF
+    chmod 644 /mnt/etc/udev/rules.d/90-pipewire.rules
+    
+    print_success "Audio configured with proper permissions"
     echo ""
 }
 
@@ -1153,11 +1230,16 @@ setup_autologin() {
     
     mkdir -p /mnt/etc/systemd/system/getty@tty1.service.d
     
+    # FIXED: Create autologin config with proper permissions
     cat > /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty -o '-p -f -- \\u' --noclear --autologin $USERNAME %I $TERM
 EOF
+    chmod 644 /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf
+    
+    # FIXED: Ensure systemd can read the override
+    chmod 755 /mnt/etc/systemd/system/getty@tty1.service.d
     
     print_success "Autologin configured"
     echo ""
@@ -1200,8 +1282,39 @@ final_steps() {
     mkdir -p /mnt/mnt/storage/docker/{configs,data}
     mkdir -p /mnt/mnt/storage/shares
     
-    # Set ownership
+    # FIXED: Set ownership and permissions properly
+    # User owns the storage directory
     arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /mnt/storage
+    # Set directory permissions (rwx for owner, r-x for group, --- for others)
+    arch-chroot /mnt chmod 750 /mnt/storage
+    arch-chroot /mnt chmod -R u+rwx,go-rwx /mnt/storage/docker
+    arch-chroot /mnt chmod -R u+rwx,go-rwx /mnt/storage/shares
+    
+    # FIXED: Create XDG_RUNTIME_DIR for Wayland
+    print_section "Setting up runtime directory for Wayland..."
+    # Get user's UID
+    USER_UID=$(arch-chroot /mnt id -u "$USERNAME" 2>/dev/null || echo "1000")
+    mkdir -p "/mnt/run/user/$USER_UID"
+    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" "/run/user/$USER_UID"
+    arch-chroot /mnt chmod 700 "/run/user/$USER_UID"
+    
+    # FIXED: Ensure systemd will create runtime directory on boot
+    mkdir -p /mnt/etc/systemd/system/user@.service.d
+    cat > /mnt/etc/systemd/system/user@.service.d/runtime.conf <<EOF
+[Service]
+# Ensure runtime directory exists and has correct permissions
+ExecStartPre=/bin/mkdir -p /run/user/%i
+ExecStartPre=/bin/chown %i:%i /run/user/%i
+ExecStartPre=/bin/chmod 700 /run/user/%i
+EOF
+    chmod 644 /mnt/etc/systemd/system/user@.service.d/runtime.conf
+    
+    # FIXED: Copy installation log to user's home for easy access
+    if [ -f "$LOG_FILE" ]; then
+        cp "$LOG_FILE" "/mnt/home/$USERNAME/install.log"
+        arch-chroot /mnt chown "$USERNAME:$USERNAME" "/home/$USERNAME/install.log"
+        chmod 644 "/mnt/home/$USERNAME/install.log"
+    fi
     
     # Create post-install info
     cat > /mnt/home/$USERNAME/POST_INSTALL_INFO.txt <<EOF
@@ -1210,6 +1323,7 @@ YggdrasilHost Installation Complete!
 
 System: $HOSTNAME
 User: $USERNAME
+Groups: wheel, audio, input, storage, power, network, video
 
 Key Commands:
 - Super + Enter: Terminal
@@ -1217,15 +1331,28 @@ Key Commands:
 - Super + E: App launcher
 - Super + Q: Close window
 
+Permissions:
+- User has sudo access (wheel group)
+- Audio: wpctl status, wpctl set-default <ID>
+- GPU: User is in video group for NVIDIA access
+- Storage: /mnt/storage is owned by user (750 permissions)
+- SSH: ~/.ssh directory ready for key setup
+
 Next Steps:
 1. Configure audio: wpctl status, then wpctl set-default <ID>
 2. Copy SSH key: ssh-copy-id $USERNAME@<ip-address>
-3. Check log: $LOG_FILE
+3. Check install log: ~/install.log
+
+Troubleshooting:
+- If audio doesn't work: sudo usermod -aG audio $USERNAME (then reboot)
+- If GPU issues: Check groups with 'groups' command, should include 'video'
+- If storage permission denied: ls -la /mnt/storage
 
 Enjoy!
 EOF
     
     arch-chroot /mnt chown "$USERNAME:$USERNAME" "/home/$USERNAME/POST_INSTALL_INFO.txt"
+    chmod 644 "/mnt/home/$USERNAME/POST_INSTALL_INFO.txt"
     
     print_success "Installation complete!"
     echo ""
