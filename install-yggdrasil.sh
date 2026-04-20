@@ -472,7 +472,8 @@ install_base() {
     pacman -Sy
     
     # Install base packages
-    pacstrap -K /mnt base base-devel linux linux-firmware \
+    # FIXED: Added --needed to avoid reinstalling existing packages
+    pacstrap -K /mnt --needed base base-devel linux linux-firmware \
         systemd systemd-sysvcompat \
         amd-ucode \
         networkmanager \
@@ -618,12 +619,12 @@ create_user() {
         print_warning "User $USERNAME already exists, updating groups and password..."
     else
         # Create user with all required groups
-        # FIXED: Added audio, input, storage, power, network groups
-        arch-chroot /mnt useradd -m -G wheel,audio,input,storage,power,network -s /bin/bash "$USERNAME"
+        # FIXED: Added audio, input, storage, power groups (network group doesn't exist in Arch)
+        arch-chroot /mnt useradd -m -G wheel,audio,input,storage,power -s /bin/bash "$USERNAME"
     fi
     
-    # FIXED: Ensure user is in all required groups even if user existed
-    arch-chroot /mnt usermod -aG wheel,audio,input,storage,power,network "$USERNAME" 2>/dev/null || true
+    # FIXED: Ensure user is in all required groups even if user existed (network group removed - doesn't exist in Arch)
+    arch-chroot /mnt usermod -aG wheel,audio,input,storage,power "$USERNAME" 2>/dev/null || true
     
     # FIXED: Use printf to safely handle special characters in password
     printf 'root:%s\n' "$USER_PASSWORD" | arch-chroot /mnt chpasswd
@@ -696,13 +697,13 @@ install_desktop() {
 
 install_nvidia() {
     print_step "Installing NVIDIA Drivers"
-    print_section "Installing nvidia-open, nvidia-utils, egl-wayland..."
+    print_section "Installing nvidia, nvidia-utils, egl-wayland..."
     
     NVIDIA_SUCCESS=false
     
     # Install proprietary NVIDIA drivers with Wayland support
-    # FIXED: Added egl-wayland, nvidia-persistenced, libva-nvidia-driver for complete support
-    if arch-chroot /mnt pacman -S --noconfirm nvidia-open nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-persistenced egl-wayland libva-nvidia-driver libva-utils 2>/dev/null; then
+    # FIXED: Use 'nvidia' package for RTX 2070 Super (proprietary driver, best compatibility)
+    if arch-chroot /mnt pacman -S --noconfirm nvidia nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-persistenced egl-wayland libva-nvidia-driver libva-utils 2>/dev/null; then
         NVIDIA_SUCCESS=true
         print_success "NVIDIA drivers installed successfully"
     else
@@ -1000,6 +1001,33 @@ EOF
     echo ""
 }
 
+# FIXED: Configure yay for non-interactive operation (defined before install_yay)
+configure_yay() {
+    print_section "Configuring AUR helper for non-interactive mode..."
+    
+    # FIXED: Ensure config directory exists before configuring
+    arch-chroot /mnt /bin/bash -c "
+        mkdir -p ~/.config
+        chmod 755 ~/.config
+    " "$USERNAME" || true
+    
+    arch-chroot /mnt /bin/bash -c "
+        # Configure yay/paru to not prompt for everything
+        if command -v yay &>/dev/null; then
+            mkdir -p ~/.config/yay
+            yay --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
+            yay --save --answerclean All --answerdiff None --answerupgrade None 2>/dev/null || true
+        fi
+        if command -v paru &>/dev/null; then
+            mkdir -p ~/.config/paru
+            paru --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
+            paru --save --skipreview 2>/dev/null || true
+        fi
+    " "$USERNAME" || true
+    
+    print_success "AUR helper configured"
+}
+
 install_yay() {
     print_step "Installing yay (AUR Helper)"
     print_section "Building yay from AUR (this may take a few minutes)..."
@@ -1150,103 +1178,6 @@ install_yay() {
     fi
     
     echo ""
-}
-    # Add EXIT trap without overwriting ERR trap
-    trap 'cleanup_yay' EXIT
-    
-    # FIXED: Import common PGP keys for AUR packages
-    print_section "Importing PGP keys for AUR..."
-    arch-chroot /mnt /bin/bash -c "
-        # Import common keys that AUR packages use
-        gpg --keyserver keyserver.ubuntu.com --recv-keys 4AEE18F83AFDEB23 2>/dev/null || true
-        gpg --keyserver keyserver.ubuntu.com --recv-keys A2C794A586439B4C 2>/dev/null || true
-    " "$USERNAME" || true
-    
-    # Clone and build yay with better error handling
-    print_section "Cloning and building yay..."
-    if ! arch-chroot /mnt /bin/bash -c "
-        export GOPATH=/tmp/go-build
-        export GOMODCACHE=/tmp/go-mod
-        export CGO_ENABLED=1
-        cd /tmp/yay-build
-        
-        # Clone with shallow history for faster download
-        git clone --depth 1 https://aur.archlinux.org/yay.git 2>&1 || {
-            echo 'Git clone failed, trying with full clone...'
-            rm -rf yay
-            git clone https://aur.archlinux.org/yay.git 2>&1
-        }
-        
-        cd yay
-        
-        # Build with explicit flags to avoid prompts
-        makepkg -si --noconfirm --needed --noprogressbar 2>&1 || {
-            echo 'makepkg failed, trying with skipchecksums...'
-            makepkg -si --noconfirm --needed --skipchecksums --skippgpcheck 2>&1
-        }
-    " "$USERNAME"; then
-        
-        print_warning "yay build failed, trying paru as alternative..."
-        
-        # FIXED: Try paru as fallback
-        if arch-chroot /mnt /bin/bash -c "
-            cd /tmp/yay-build
-            git clone --depth 1 https://aur.archlinux.org/paru.git 2>&1 || {
-                rm -rf paru
-                git clone https://aur.archlinux.org/paru.git 2>&1
-            }
-            cd paru
-            makepkg -si --noconfirm --needed 2>&1
-        " "$USERNAME"; then
-            print_success "paru installed as alternative to yay"
-            # Create yay symlink for compatibility
-            arch-chroot /mnt ln -sf /usr/bin/paru /usr/local/bin/yay 2>/dev/null || true
-        else
-            print_error "Both yay and paru failed to build!"
-            print_error "AUR packages will not be available."
-            # Don't exit - system will work without AUR
-        fi
-    fi
-    
-    # Remove temporary passwordless sudo
-    rm -f /mnt/etc/sudoers.d/temp-yay
-    
-    # Verify AUR helper installation
-    if arch-chroot /mnt which yay &>/dev/null || arch-chroot /mnt which paru &>/dev/null; then
-        print_success "AUR helper installed"
-        configure_yay
-    else
-        print_warning "No AUR helper available - AUR packages will be skipped"
-    fi
-    
-    echo ""
-}
-
-# FIXED: Configure yay for non-interactive operation
-configure_yay() {
-    print_section "Configuring AUR helper for non-interactive mode..."
-    
-    # FIXED: Ensure config directory exists before configuring
-    arch-chroot /mnt /bin/bash -c "
-        mkdir -p ~/.config
-        chmod 755 ~/.config
-    " "$USERNAME" || true
-    
-    arch-chroot /mnt /bin/bash -c "
-        # Configure yay/paru to not prompt for everything
-        if command -v yay &>/dev/null; then
-            mkdir -p ~/.config/yay
-            yay --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
-            yay --save --answerclean All --answerdiff None --answerupgrade None 2>/dev/null || true
-        fi
-        if command -v paru &>/dev/null; then
-            mkdir -p ~/.config/paru
-            paru --save --nocleanmenu --nodiffmenu --noupgrademenu --removemake --cleanafter 2>/dev/null || true
-            paru --save --skipreview 2>/dev/null || true
-        fi
-    " "$USERNAME" || true
-    
-    print_success "AUR helper configured"
 }
 
 install_brave() {
