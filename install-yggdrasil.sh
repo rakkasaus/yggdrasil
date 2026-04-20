@@ -643,34 +643,80 @@ install_desktop() {
 
 install_nvidia() {
     print_step "Installing NVIDIA Drivers"
-    print_section "Installing nvidia, nvidia-utils, configuring mkinitcpio..."
+    print_section "Installing nvidia-open, nvidia-utils, egl-wayland..."
     
-    # Install proprietary NVIDIA drivers with fallback
-    # FIXED: nvidia package renamed to nvidia-open in Dec 2025
-    if ! arch-chroot /mnt pacman -S --noconfirm nvidia-open nvidia-utils nvidia-settings lib32-nvidia-utils 2>/dev/null; then
+    NVIDIA_SUCCESS=false
+    
+    # Install proprietary NVIDIA drivers with Wayland support
+    # FIXED: Added egl-wayland, nvidia-persistenced, libva-nvidia-driver for complete support
+    if arch-chroot /mnt pacman -S --noconfirm nvidia-open nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-persistenced egl-wayland libva-nvidia-driver libva-utils 2>/dev/null; then
+        NVIDIA_SUCCESS=true
+        print_success "NVIDIA drivers installed successfully"
+    else
         print_warning "NVIDIA driver installation failed!"
-        print_warning "Installing fallback drivers..."
-        arch-chroot /mnt pacman -S --noconfirm xf86-video-fbdev xf86-video-vesa || true
-        print_warning "System will use basic drivers. You can install NVIDIA manually later."
+        print_warning "Installing Mesa software rendering fallback..."
+        # FIXED: Mesa is proper fallback for Wayland (xf86-video-* are X11 only)
+        arch-chroot /mnt pacman -S --noconfirm mesa mesa-utils libva-mesa-driver || true
+        print_warning "System will use software rendering. Install NVIDIA manually later."
     fi
     
-    # Configure mkinitcpio for NVIDIA
-    # FIXED: Use more robust sed pattern to remove kms hook
-    sed -i 's/ kms / /g' /mnt/etc/mkinitcpio.conf
-    
-    # Add NVIDIA modules
-    if ! grep -q "MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)" /mnt/etc/mkinitcpio.conf; then
-        sed -i 's/^MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /mnt/etc/mkinitcpio.conf
+    # Only configure NVIDIA-specific settings if installation succeeded
+    if [ "$NVIDIA_SUCCESS" = true ]; then
+        print_section "Configuring NVIDIA kernel modules..."
+        
+        # Configure mkinitcpio for NVIDIA
+        # FIXED: Remove kms hook
+        sed -i 's/ kms / /g' /mnt/etc/mkinitcpio.conf
+        sed -i 's/"kms"/""/g' /mnt/etc/mkinitcpio.conf
+        
+        # FIXED: Add NVIDIA modules (handle both empty and existing MODULES)
+        if grep -q "^MODULES=(" /mnt/etc/mkinitcpio.conf; then
+            # Add to existing MODULES
+            sed -i 's/^MODULES=(\(.*\))/MODULES=(\1 nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /mnt/etc/mkinitcpio.conf
+        else
+            # Create new MODULES line
+            echo "MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)" >> /mnt/etc/mkinitcpio.conf
+        fi
+        
+        # Regenerate initramfs
+        arch-chroot /mnt mkinitcpio -P
+        
+        # FIXED: Comprehensive NVIDIA modprobe configuration
+        mkdir -p /mnt/etc/modprobe.d
+        cat > /mnt/etc/modprobe.d/nvidia.conf <<'EOF'
+# NVIDIA DRM KMS
+options nvidia-drm modeset=1
+
+# Preserve video memory for suspend/resume
+options nvidia NVreg_PreserveVideoMemoryAllocations=1
+
+# Enable GPU firmware (for Turing and newer)
+options nvidia NVreg_EnableGpuFirmware=1
+
+# Disable legacy VGA compatibility (can cause issues)
+options nvidia NVreg_UsePageAttributeTable=1
+EOF
+        
+        # FIXED: Enable nvidia-persistenced for reliable GPU initialization
+        arch-chroot /mnt systemctl enable nvidia-persistenced.service 2>/dev/null || true
+        
+        # FIXED: Create udev rule for NVIDIA device permissions
+        cat > /mnt/etc/udev/rules.d/70-nvidia.rules <<'EOF'
+# Allow users to access NVIDIA devices
+KERNEL=="nvidia*", MODE="0666", OWNER="root", GROUP="video"
+KERNEL=="nvidia_modeset*", MODE="0666", OWNER="root", GROUP="video"
+KERNEL=="nvidia_uvm*", MODE="0666", OWNER="root", GROUP="video"
+KERNEL=="nvidia_drm", MODE="0666", OWNER="root", GROUP="video"
+EOF
+        
+        # FIXED: Add user to video group for GPU access
+        arch-chroot /mnt usermod -aG video "$USERNAME" 2>/dev/null || true
+        
+        print_success "NVIDIA drivers configured with DRM KMS, persistenced, and video memory preservation"
+    else
+        print_warning "Skipping NVIDIA-specific configuration (using fallback)"
     fi
     
-    # Regenerate initramfs
-    arch-chroot /mnt mkinitcpio -P
-    
-    # Enable NVIDIA DRM modeset
-    mkdir -p /mnt/etc/modprobe.d
-    echo "options nvidia-drm modeset=1" > /mnt/etc/modprobe.d/nvidia.conf
-    
-    print_success "NVIDIA drivers installed and configured"
     echo ""
 }
 
@@ -690,9 +736,13 @@ configure_hyprland() {
 # Monitor configuration (4K TV)
 monitor=,preferred,auto,1.5
 
-# NVIDIA compatibility
+# FIXED: Comprehensive NVIDIA compatibility settings
 env = WLR_NO_HARDWARE_CURSORS,1
 env = WLR_RENDERER_ALLOW_SOFTWARE,1
+env = __GLX_VENDOR_LIBRARY_NAME,nvidia
+env = GBM_BACKEND,nvidia-drm
+env = __GL_GSYNC_ALLOWED,1
+env = __GL_VRR_ALLOWED,1
 env = XCURSOR_SIZE,24
 env = HYPRCURSOR_SIZE,24
 
@@ -701,9 +751,14 @@ input {
     kb_layout = no
     follow_mouse = 1
     touchpad {
-        natural_scroll = false
+        natural_cursor = false
     }
     sensitivity = 0
+}
+
+# FIXED: Disable hardware cursors for NVIDIA compatibility
+cursor {
+    no_hardware_cursors = true
 }
 
 general {
