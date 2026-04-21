@@ -1347,13 +1347,10 @@ final_steps() {
     chmod -R u+rwx,go-rwx /mnt/mnt/storage/docker
     chmod -R u+rwx,go-rwx /mnt/mnt/storage/shares
     
-    # FIXED: Create XDG_RUNTIME_DIR for Wayland
-    print_section "Setting up runtime directory for Wayland..."
-    # Get user's UID
-    USER_UID=$(arch-chroot /mnt id -u "$USERNAME" 2>/dev/null || echo "1000")
-    mkdir -p "/mnt/run/user/$USER_UID"
-    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" "/run/user/$USER_UID"
-    arch-chroot /mnt chmod 700 "/run/user/$USER_UID"
+    # FIXED: XDG_RUNTIME_DIR is created automatically by pam_systemd on login
+    # /run is a tmpfs that's not available during installation
+    # The systemd user@.service override below ensures proper permissions on boot
+    print_section "Setting up runtime directory handling..."
     
     # FIXED: Ensure systemd will create runtime directory on boot
     mkdir -p /mnt/etc/systemd/system/user@.service.d
