@@ -15,7 +15,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Step counter
-TOTAL_STEPS=23
+TOTAL_STEPS=26
 CURRENT_STEP=0
 
 # Logging - FIXED: Check /tmp space first and set proper permissions
@@ -1337,9 +1337,11 @@ final_steps() {
     mkdir -p /mnt/mnt/storage/docker/{configs,data}
     mkdir -p /mnt/mnt/storage/shares
     
-    # FIXED: Set ownership and permissions properly (on host side, before chroot)
-    # User owns the storage directory
-    chown -R "$USERNAME:$USERNAME" /mnt/mnt/storage
+    # FIXED: Set ownership using numeric UID/GID (user only exists inside chroot)
+    # Get user's UID/GID from inside chroot since user doesn't exist on host
+    USER_UID=$(arch-chroot /mnt id -u "$USERNAME")
+    USER_GID=$(arch-chroot /mnt id -g "$USERNAME")
+    chown -R "$USER_UID:$USER_GID" /mnt/mnt/storage
     # Set directory permissions (rwx for owner, r-x for group, --- for others)
     chmod 750 /mnt/mnt/storage
     chmod -R u+rwx,go-rwx /mnt/mnt/storage/docker
