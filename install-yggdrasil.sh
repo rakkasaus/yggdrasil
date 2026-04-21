@@ -1071,14 +1071,12 @@ install_yay() {
     # FIXED: Ensure /tmp has correct permissions for user builds
     chmod 1777 /mnt/tmp 2>/dev/null || true
     
-    # Create temporary build directory with proper permissions
-    mkdir -p /mnt/tmp/yay-build
-    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/yay-build
-    
-    # FIXED: Create and chown Go build directories
-    mkdir -p /mnt/tmp/go-build /mnt/tmp/go-mod
-    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/go-build
-    arch-chroot /mnt chown -R "$USERNAME:$USERNAME" /tmp/go-mod
+    # FIXED: Create build directories INSIDE chroot with proper ownership
+    # Bug was: creating on host at /mnt/tmp but chown inside chroot at /tmp
+    arch-chroot /mnt /bin/bash -c "
+        mkdir -p /tmp/yay-build /tmp/go-build /tmp/go-mod
+        chown $USERNAME:$USERNAME /tmp/yay-build /tmp/go-build /tmp/go-mod
+    "
     
     # FIXED: Cleanup function for temp directory (preserves error handler)
     cleanup_yay() {
