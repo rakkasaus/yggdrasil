@@ -697,13 +697,24 @@ install_desktop() {
 
 install_nvidia() {
     print_step "Installing NVIDIA Drivers"
-    print_section "Installing nvidia-open, nvidia-utils, egl-wayland..."
+    print_section "Installing nvidia-open-dkms and all required dependencies..."
     
     NVIDIA_SUCCESS=false
     
-    # Install proprietary NVIDIA drivers with Wayland support
-    # FIXED: Use 'nvidia-open' package (the only NVIDIA driver package in Arch repos as of 2026)
-    if arch-chroot /mnt pacman -S --noconfirm nvidia-open nvidia-utils nvidia-settings lib32-nvidia-utils nvidia-persistenced egl-wayland libva-nvidia-driver libva-utils 2>/dev/null; then
+    # FIXED: Install all required NVIDIA packages for proper Wayland/Hyprland support
+    # Based on Arch Wiki and Hyprland Wiki recommendations
+    # Verified all packages exist in official Arch repos (2026-04-21)
+    if arch-chroot /mnt pacman -S --noconfirm \
+        nvidia-open-dkms \
+        nvidia-utils \
+        nvidia-settings \
+        lib32-nvidia-utils \
+        nvidia-persistenced \
+        egl-wayland \
+        libva-nvidia-driver \
+        libva-utils \
+        vulkan-icd-loader \
+        vulkan-tools 2>/dev/null; then
         NVIDIA_SUCCESS=true
         print_success "NVIDIA drivers installed successfully"
     else
@@ -810,14 +821,16 @@ configure_hyprland() {
 # Monitor configuration (4K TV)
 monitor=,preferred,auto,1.5
 
-# FIXED: Comprehensive NVIDIA compatibility settings
-env = WLR_NO_HARDWARE_CURSORS,1
-env = WLR_RENDERER_ALLOW_SOFTWARE,1
-env = __GLX_VENDOR_LIBRARY_NAME,nvidia
-env = __GL_GSYNC_ALLOWED,1
-env = __GL_VRR_ALLOWED,1
-env = XCURSOR_SIZE,24
-env = HYPRCURSOR_SIZE,24
+    # FIXED: Comprehensive NVIDIA compatibility settings
+    # Based on Arch Wiki and Hyprland Wiki recommendations
+    env = WLR_NO_HARDWARE_CURSORS,1
+    env = WLR_RENDERER_ALLOW_SOFTWARE,1
+    env = __GLX_VENDOR_LIBRARY_NAME,nvidia
+    env = LIBVA_DRIVER_NAME,nvidia
+    env = __GL_GSYNC_ALLOWED,1
+    env = __GL_VRR_ALLOWED,1
+    env = XCURSOR_SIZE,24
+    env = HYPRCURSOR_SIZE,24
 
 # Input
 input {
